@@ -1,0 +1,59 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  ssh-deploy:
+    name: SSH Deploy to cPanel
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup SSH Key
+      run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p ${{ secrets.SSH_PORT }} -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+    - name: 📁 Buat arsip ZIP
+      run: |
+          zip -r laravel-deploy.zip . -x "*.git*"
+    - name: 📤 Deploy via SCP
+      run: |
+          scp -P ${{ secrets.SSH_PORT }} -r -v laravel-deploy.zip ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:${{ secrets.TARGET_DIR }}
+    - name: 📂 Installing
+      run: |
+          ssh -o StrictHostKeyChecking=no -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} << 'EOF'
+            set -e  # Exit on first error
+            set -x  # Print each command for debugging
+
+            cd "${{ secrets.TARGET_DIR }}" || exit 1
+
+            unzip -o laravel-deploy.zip
+            rm laravel-deploy.zip
+
+            # Ensure Composer and PHP are available
+            which php || echo "PHP not found"
+            which composer || echo "Composer not found"
+
+            composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+
+            if [ ! -f .env ]; then
+              cp .env.example .env
+              sed -i "s|^DB_HOST=.*|DB_HOST=${{ secrets.DB_HOST }}|" .env
+              sed -i "s|^DB_DATABASE=.*|DB_DATABASE=${{ secrets.DB_DATABASE }}|" .env
+              sed -i "s|^DB_USERNAME=.*|DB_USERNAME=${{ secrets.DB_USERNAME }}|" .env
+              sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=${{ secrets.DB_PASSWORD }}|" .env
+              php artisan key:generate
+            fi
+
+            php artisan migrate --force
+            php artisan optimize:clear
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+          EOF
